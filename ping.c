@@ -31,6 +31,8 @@
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
 
+#define BUF_SIZE 500
+
 int request = 1;
 
 void sighandler(int signum)
@@ -70,6 +72,8 @@ int main(int argc, char **argv){
     /*
      * Waiting for user to trigger Ctrl-C
      */
+
+
     struct sigaction act;
     act.sa_handler = sighandler;
     sigaction(SIGINT, &act, NULL);
@@ -111,7 +115,7 @@ int main(int argc, char **argv){
 
     struct timeval timeout;
     struct timespec sent, received; //nanoseconds
-    timeout.tv_sec = 1;
+    timeout.tv_sec = 5;
     timeout.tv_usec = 0;    //microseconds
     
     //clock_gettime(CLOCK_MONOTONIC, &tp); This is for total time
@@ -146,7 +150,17 @@ int main(int argc, char **argv){
     out_addr.sin_family = AF_INET;
     out_addr.sin_port = htons(0);
 
+    int flags = fcntl(socketfd, F_GETFL, 0);
+    int r = fcntl(socketfd, F_SETFL, flags | O_NONBLOCK);
+    if(r < 0){fprintf(stderr, "fcntl failed");}
+
     int seqnum = -1;
+    double min = 500.0;
+    double sum = 0.0;
+    double max = 0.0;
+
+    char buf[BUF_SIZE];
+
     while(request)
     {
         /*
@@ -157,19 +171,19 @@ int main(int argc, char **argv){
         //struct icmp hdr;
         struct packet pac;
         bzero(&pac, sizeof(pac));
-        pac.hdr.icmp_type = 8;
+        pac.hdr.icmp_type = ICMP_ECHO;
         pac.hdr.icmp_hun.ih_idseq.icd_id = getpid();
         pac.hdr.icmp_hun.ih_idseq.icd_seq = seqnum++;
         pac.hdr.icmp_cksum = checksum(&pac, sizeof(pac));
 
-        for ( int i = 0; i < sizeof(pac.msg)-1; i++ ) 
-            pac.msg[i] = i+'0'; 
+        // for ( int i = 0; i < sizeof(pac.msg)-1; i++ ) 
+        //     pac.msg[i] = i+'0'; 
         
         pac.msg[1] = 0;
         sleep(1);
 
         clock_gettime(CLOCK_MONOTONIC, &sent);
-        if (sendto(socketfd, &pac, sizeof(pac), 0, (struct sockaddr*)&out_addr, sizeof(out_addr)) == -1)
+        if (sendto(socketfd, &pac, sizeof(pac), MSG_DONTWAIT, (struct sockaddr*)&out_addr, sizeof(out_addr)) == -1)
         {
             perror("SENDING FAILED");
         }else{
@@ -177,19 +191,40 @@ int main(int argc, char **argv){
         }
 
         socklen_t in_addr_len = sizeof(in_addr); 
-        
-        if (recvfrom(socketfd, &pac, sizeof(pac), 0, (struct sockaddr*)&in_addr, &in_addr_len) == -1)
+        if (recvfrom(socketfd, buf , BUF_SIZE, MSG_DONTWAIT, (struct sockaddr*)&in_addr, &in_addr_len) == -1)
         {
             perror("\nRECEIVING FAILED");
         }else{
             received_packet++;
         }
+
+        if(pac.hdr.icmp_type == 11)
+        {
+            if(pac.hdr.icmp_code == 0)
+            {
+                fprintf(stderr, "Code 0, Time Exceeded: Time-to-live exceeded in transit");
+            }else if(pac.hdr.icmp_code == 1)
+            {
+                fprintf(stderr, "Code 1, Time Exceeded: Fragment reassembly time exceeded");
+            }
+        }
+
         clock_gettime(CLOCK_MONOTONIC, &received);
 
-        double time = (received.tv_nsec - sent.tv_nsec) / 1000000.0;
-        fprintf(stderr, "64 bytes from %s: icmp_seq = %d ttl = %d time = %f ms", ip_addr, seqnum, ttl, time);
+        double time = (received.tv_nsec - sent.tv_nsec) / 1000000.0 + (received.tv_sec - sent.tv_sec) * 1000.0;
+        fprintf(stderr, "64 bytes from %s: icmp_seq = %d ttl = %d time = %.3f ms", ip_addr, seqnum, ttl, time);
+        if ( time < min){
+            min = time;
+        }
+        if ( time > max){
+            max = time;
+        }
+        sum += time;
     }
     fprintf(stderr, "\n--- %s ping statistics ---\n", argv[1]);
-    fprintf(stderr, "%d packets transmitted, %d packets received, %.2f%% packet loss", sent_packet, received_packet, 
+    fprintf(stderr, "%d packets transmitted, %d packets received, %.2f%% packet loss\n", sent_packet, received_packet, 
                                                                         (sent_packet-received_packet)/sent_packet * 100.0);
+    double average = sum / sent_packet;
+    
+    fprintf(stderr, "round-trip,on/min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms", min, average, max, (max-min)/4);
 }
